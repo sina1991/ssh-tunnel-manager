@@ -1,0 +1,33 @@
+# Runtime data and server configuration
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups and archives
+_archive/
+*.bak
+*.bak.*
+*.pre-rewrite*
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*credential*
+*secret*
+*token*
+
+# Logs and temporary files
+*.log
+*.pid
+*.tmp
+*~
+.DS_Store
