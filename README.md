@@ -1,105 +1,98 @@
 # SSH Tunnel Manager
 
-A lightweight Bash-based SSH tunnel management tool for Ubuntu servers.
-It provides an interactive terminal dashboard for managing SSH servers,
-local forwarding tunnels, systemd services, and tunnel health checks.
+A Bash-based SSH tunnel management dashboard for Ubuntu servers. It manages
+SSH destinations, local TCP forwarding tunnels, systemd services, and health
+checks.
 
 ## Features
 
 - Interactive terminal dashboard
 - Multiple SSH server configurations
 - Multiple local-to-remote SSH forwarding tunnels
-- systemd service status and startup checks
-- Manual tunnel testing
-- Health-check status and timestamps
-- Server and tunnel management through a menu
+- systemd service creation and management for configured tunnels
+- Enable, disable, start, and stop tunnel services
+- Manual SSH and local-port checks
+- Scheduled health checks every 30 minutes
+- Persistent runtime databases
 
 ## Requirements
 
-- Ubuntu Linux
-- Bash
-- OpenSSH client
-- systemd
-- Root privileges for service and system configuration changes
-
-## Project Structure
-
-```text
-ssh-tunnel-manager/
-├── tunnel.sh
-├── install.sh
-├── health-check.sh
-├── lib/
-│   ├── common.sh
-│   ├── servers.sh
-│   ├── systemd.sh
-│   └── tunnels.sh
-├── data/              # Local runtime data; not tracked by Git
-├── .gitignore
-└── README.md
-```
+- Ubuntu Linux with systemd
+- Root privileges for installation and system configuration
+- Network access to GitHub and the package repositories during installation
 
 ## Installation
 
-The current scripts use `/opt/tunnel-manager` as the installation path.
+Review `install.sh` before running a remote installer as root.
 
-Review the scripts before running them on a server.
+Install directly on a fresh VPS:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y git openssh-client
-sudo git clone https://github.com/sina1991/ssh-tunnel-manager.git /opt/tunnel-manager
-cd /opt/tunnel-manager
-sudo bash install.sh
-sudo bash tunnel.sh
+curl -fsSL https://raw.githubusercontent.com/sina1991/ssh-tunnel-manager/main/install.sh | sudo bash
 ```
 
-The current `install.sh` prepares file permissions and basic runtime
-database files. It does not, by itself, perform a complete fresh deployment
-of every systemd service and health-check timer. Review the service-management
-code and configure the required systemd units before relying on scheduled
-health checks on a new server.
+The installer downloads the project, installs the required packages, prepares
+runtime files, configures the health-check systemd service and timer, validates
+the shell scripts, and runs an initial health check. If an interactive terminal
+is available, it offers to open the dashboard.
+
+The installation directory is `/opt/tunnel-manager`.
 
 ## Usage
 
-Run the interactive menu as root:
+Open the dashboard:
 
 ```bash
 sudo bash /opt/tunnel-manager/tunnel.sh
 ```
 
-Use the menu to add SSH servers, configure tunnels, test connectivity,
-and manage tunnel services.
+Use the menu to add an SSH server, then configure a tunnel for that server.
+The server-add workflow installs the local root user's SSH public key on the
+destination using `ssh-copy-id`; you must have the necessary authentication
+access to that destination.
+
+Enable or start a configured tunnel from the dashboard. Tunnel services are
+created when a tunnel is added.
 
 ## Health Checks
 
-Run the health-check script manually with Bash:
+Run a manual check:
 
 ```bash
 sudo bash /opt/tunnel-manager/health-check.sh
 ```
 
-If scheduled health checks are configured, inspect their status with:
+Inspect the scheduled timer and recent logs:
 
 ```bash
-systemctl status tunnel-health-check.timer
-systemctl status tunnel-health-check.service
+systemctl status tunnel-health-check.timer --no-pager
+systemctl status tunnel-health-check.service --no-pager
+journalctl -u tunnel-health-check.service -n 50 --no-pager
 ```
 
-## Security
+## Runtime Data and Updates
 
-- Do not commit real server databases or runtime configuration.
-- Never commit SSH private keys, passwords, access tokens, or credentials.
-- Keep `data/` and `_archive/` private.
-- Review all changes before pushing to a public repository.
-- Use dedicated SSH credentials with the minimum permissions required.
+Runtime databases are stored under `/opt/tunnel-manager/data/` and are not
+included in the repository. The installer creates missing databases without
+overwriting existing database contents.
 
-## Configuration and Compatibility
+The installer downloads the current `main` branch and installs application
+files. Back up runtime databases before making major changes or reinstalling.
 
-The scripts currently use fixed paths under `/opt/tunnel-manager`.
-Review the source code before installing the project in a different location.
+## Security Notes
+
+- The dashboard and health checks run with root privileges.
+- SSH private keys must never be committed to the repository.
+- Treat `data/` as sensitive operational data.
+- A tunnel bound to `0.0.0.0` listens on all IPv4 interfaces. Use firewall
+  rules and select the bind address carefully.
+- Review the installer source before executing it as root.
+
+## Compatibility
+
+The application uses fixed paths under `/opt/tunnel-manager` and systemd unit
+files under `/etc/systemd/system/`.
 
 ## License
 
-No license has been specified yet. All rights remain with the copyright holder
-until a license is added.
+No license has been specified yet.
