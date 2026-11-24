@@ -360,15 +360,16 @@ def show(servers, tunnels, *, show_servers=True, show_tunnels=True):
 
 def add_server(servers, tunnels):
     host = input("Server address: ").strip()
-    if not HOST.fullmatch(host) or any(s["host"] == host for s in servers.values()):
-        raise ValueError("Invalid or already registered server address")
-    server = dict(host=host, user="root")
+    if not HOST.fullmatch(host):
+        raise ValueError("Invalid server address")
+    existing = next((sid for sid, server in servers.items() if server["host"] == host), None)
+    server = servers[existing] if existing else dict(host=host, user="root")
     local_machine = Path("/etc/machine-id").read_text().strip()
     identity = Path("/root/.ssh/30na_windows")
     if remote(server, ["true"], check=False).returncode:
         # ssh-copy-id performs first-use host verification and initial login.
         subprocess.run(["ssh-copy-id", "-o", "ConnectTimeout=8", "-i",
-                        f"{identity}.pub", f"root@{host}"], check=True, timeout=120)
+                        f"{identity}.pub", f"{server['user']}@{host}"], check=True, timeout=120)
     if output(remote(server, ["cat", "/etc/machine-id"])) == local_machine:
         raise ValueError("The local server cannot be added as a peer")
     revision = (BASE / "revision").read_text().strip()
@@ -381,7 +382,7 @@ def add_server(servers, tunnels):
     if installed != (BASE / "manager.py").read_bytes():
         raise RuntimeError("The installed peer version differs from this dashboard. Update this host first.")
     remote(server, ["systemctl", "is-active", "tunnel-health-check.timer"])
-    servers[next_id(servers)] = server
+    servers[existing or next_id(servers)] = server
     save(servers, tunnels)
 
 
@@ -436,7 +437,7 @@ def cli():
         try:
             servers, tunnels = load()
             if section == "home":
-                addresses = output(run(["hostname", "-I"])).split()
+                addresses = output(run(["hostname", "-I"], check=False)).split()
                 address = next(iter(addresses), "—")
                 print(f"\nSSH TUNNEL MANAGER v2  ·  {socket.gethostname()}  ·  {address}")
                 show(servers, tunnels)
