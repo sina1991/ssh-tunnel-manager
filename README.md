@@ -1,10 +1,10 @@
 # SSH Tunnel Manager v2
 
 Ubuntu terminal dashboard for managing OpenSSH TCP forwards with systemd. The
-dashboard host holds the server registry and the listening ports. Forward
-connections originate on the dashboard host. Reverse SSH connections originate
-on the selected peer, with the SSH listener on the dashboard host and the TCP
-target on the peer.
+dashboard host holds the server registry. The selected Local VPS listens and
+the selected Remote VPS hosts the TCP target. Forward SSH starts on Local VPS
+and Reverse SSH starts on Remote VPS. Forward between other hosts requires
+noninteractive SSH trust from Local VPS to Remote VPS.
 
 ## Install on the dashboard host
 
@@ -45,9 +45,7 @@ assigning its listener to the manager.
   22, respectively. The remote port is the service port, not the SSH port
   setting. The temporary SSH process expires after 12 seconds.
 - **Tunnels** — Add, Remove, and Tunnel Test. Tunnel Test checks all active
-  tunnels. New tunnels start immediately and at boot. Use the dashboard host's public IPv4
-  address as the listen address if it is assigned to an interface and the listener
-  must accept external connections. Permit the chosen TCP port in your firewalls.
+  tunnels. New tunnels start immediately and at boot. The listener binds to all IPv4 interfaces on the selected Local VPS. Permit the chosen TCP port in your firewalls.
   The TCP target is `127.0.0.1` on the selected peer.
 - **Remove server** — Removes every managed tunnel for the peer before removing
   the server record. If cleanup fails, the server remains registered so the
@@ -77,8 +75,7 @@ journalctl -u tunnel-health-check.service -n 50 --no-pager
 
 ## 30nA-TUNNEL v2.0.0 — راهنمای کاربر
 
-این بخش طرح تأییدشدهٔ CLI است. نمونه‌ها رفتار مورد انتظار نسخهٔ `30na-tunnel.sh`
-را نشان می‌دهند. برای نصب و اجرای نسخهٔ فعلی از بخش Install بالا استفاده کن.
+نمونه‌های زیر جریان منو را نشان می‌دهند. دستور نصب و مسیر اجرای فعلی در بخش Install آمده‌اند.
 
 ```mermaid
 flowchart TD

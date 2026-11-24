@@ -39,6 +39,8 @@ def output(result):
 
 
 def remote(server, args, *, check=True, data=None, timeout=20):
+    if server.get("dashboard"):
+        return run(args, check=check, data=data, timeout=timeout)
     identity = Path("/root/.ssh/30na_windows")
     options = ["-i", str(identity)] if identity.is_file() else []
     return run([*SSH, *options, f"{server['user']}@{server['host']}", shlex.join(args)],
@@ -69,16 +71,21 @@ def load():
     reverse = DATA / "reverse.json"
     if reverse.exists():
         tunnels.update(json.loads(reverse.read_text()))
+    pairs = DATA / "pairs.json"
+    if pairs.exists():
+        tunnels.update(json.loads(pairs.read_text()))
     return servers, tunnels
 
 
 def save(servers, tunnels):
     forward = "".join(
         "|".join(map(str, (tid, t["name"], t["server"], t["listen"], t["target"], t["bind"]))) + "\n"
-        for tid, t in tunnels.items() if t["kind"] == "Forward")
+        for tid, t in tunnels.items() if t["kind"] == "Forward" and "local_id" not in t)
     atomic_write(DATA / "tunnels.db", forward)
     atomic_write(DATA / "reverse.json", json.dumps(
-        {tid: t for tid, t in tunnels.items() if t["kind"] == "Reverse"}))
+        {tid: t for tid, t in tunnels.items() if t["kind"] == "Reverse" and "local_id" not in t}))
+    atomic_write(DATA / "pairs.json", json.dumps(
+        {tid: t for tid, t in tunnels.items() if "local_id" in t}))
     atomic_write(DATA / "servers.db", "".join(
         f"{sid}|{s['host']}|{s['user']}\n" for sid, s in servers.items()))
 
@@ -91,7 +98,7 @@ def locked():
 
 
 def unit_name(tid, tunnel):
-    if tunnel["kind"] == "Forward":
+    if tunnel["kind"] == "Forward" and "account" not in tunnel:
         return f"ssh-tunnel-{tid}.service"
     return f"{tunnel['account']}.service"
 
@@ -99,7 +106,12 @@ def unit_name(tid, tunnel):
 def on_client(server, tunnel, args, **kwargs):
     if tunnel["kind"] == "Reverse":
         return remote(server, args, **kwargs)
-    return run(args, **kwargs)
+    return on_local(tunnel, args, **kwargs)
+
+
+def on_local(tunnel, args, **kwargs):
+    endpoint = tunnel.get("local_endpoint")
+    return remote(endpoint, args, **kwargs) if endpoint else run(args, **kwargs)
 
 
 def unit_action(server, tunnel, tid, action, *, check=True):
@@ -139,7 +151,7 @@ def write_unit(server, tunnel, tid, args):
 
 def forward_args(server, tunnel):
     key = Path("/root/.ssh/30na_windows")
-    identity = ["-i", str(key)] if key.exists() else []
+    identity = ["-i", str(key)] if key.exists() and not tunnel.get("local_endpoint") else []
     return ["/usr/bin/ssh", "-NT", *SSH[1:], *identity, "-L",
             f"{tunnel['bind']}:{tunnel['listen']}:127.0.0.1:{tunnel['target']}",
             "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
@@ -161,7 +173,8 @@ def prepare_reverse(server, tunnel):
     account = tunnel["account"]
     key = f"{BASE}/data/{account}.key"
     known_hosts = f"{BASE}/data/{account}.hosts"
-    host_key = Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().split()
+    remote(server, ["install", "-d", "-m", "0700", f"{BASE}/data"])
+    host_key = output(on_local(tunnel, ["cat", "/etc/ssh/ssh_host_ed25519_key.pub"])).split()
     remote(server, ["tee", known_hosts],
            data=f"{tunnel['ssh_host']} {host_key[0]} {host_key[1]}\n".encode())
     pubkey = output(remote(server, ["sh", "-c",
@@ -170,14 +183,14 @@ def prepare_reverse(server, tunnel):
     fields = pubkey.split()
     if len(fields) < 2 or fields[0] != "ssh-ed25519" or not re.fullmatch(r"[A-Za-z0-9+/=]+", fields[1]):
         raise RuntimeError("Invalid reverse public key")
-    run(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", account])
-    authorized = Path(f"/etc/ssh/{account}.keys")
-    authorized.write_text(
+    on_local(tunnel, ["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", account])
+    authorized = f"/etc/ssh/{account}.keys"
+    on_local(tunnel, ["tee", authorized], data=(
         f'restrict,port-forwarding,permitlisten="{tunnel["bind"]}:{tunnel["listen"]}" '
-        f'{fields[0]} {fields[1]}\n')
-    authorized.chmod(0o644)
-    config = Path(f"/etc/ssh/sshd_config.d/{account}.conf")
-    config.write_text(
+        f'{fields[0]} {fields[1]}\n').encode())
+    on_local(tunnel, ["chmod", "0644", authorized])
+    config = f"/etc/ssh/sshd_config.d/{account}.conf"
+    on_local(tunnel, ["tee", config], data=(
         f"Match User {account}\n"
         f"    AuthorizedKeysFile {authorized}\n"
         "    PasswordAuthentication no\n"
@@ -187,20 +200,24 @@ def prepare_reverse(server, tunnel):
         "    GatewayPorts clientspecified\n"
         "    AllowTcpForwarding remote\n"
         f"    PermitListen {tunnel['bind']}:{tunnel['listen']}\n"
-        "Match all\n")
-    run(["sshd", "-t"])
-    effective = output(run(["sshd", "-T", "-C", f"user={account},host=localhost,addr=127.0.0.1"]))
+        "Match all\n").encode())
+    on_local(tunnel, ["sshd", "-t"])
+    effective = output(on_local(tunnel, ["sshd", "-T", "-C", f"user={account},host=localhost,addr=127.0.0.1"]))
     for setting in ("gatewayports clientspecified", "maxsessions 0",
                     "allowtcpforwarding remote", "disableforwarding no",
                     f"permitlisten {tunnel['bind']}:{tunnel['listen']}"):
         if setting not in effective.splitlines():
             raise RuntimeError(f"Missing effective sshd setting: {setting}")
-    run(["systemctl", "reload", "ssh"])
+    on_local(tunnel, ["systemctl", "reload", "ssh"])
+
+
+def target_vps(servers, tunnel):
+    return tunnel.get("dashboard_target") or servers.get(tunnel["server"])
 
 
 def remove_tunnel(servers, tunnels, tid):
     tunnel = tunnels[tid]
-    server = servers[tunnel["server"]]
+    server = target_vps(servers, tunnel)
     unit = unit_name(tid, tunnel)
     path = f"/etc/systemd/system/{unit}"
     on_client(server, tunnel, ["sh", "-ec",
@@ -210,12 +227,11 @@ def remove_tunnel(servers, tunnels, tid):
         account = tunnel["account"]
         remote(server, ["rm", "-f", f"{BASE}/data/{account}.key",
                         f"{BASE}/data/{account}.key.pub", f"{BASE}/data/{account}.hosts"])
-        Path(f"/etc/ssh/sshd_config.d/{account}.conf").unlink(missing_ok=True)
-        Path(f"/etc/ssh/{account}.keys").unlink(missing_ok=True)
-        run(["sshd", "-t"])
-        run(["systemctl", "reload", "ssh"])
-        if run(["id", account], check=False).returncode == 0:
-            run(["userdel", account])
+        on_local(tunnel, ["rm", "-f", f"/etc/ssh/sshd_config.d/{account}.conf", f"/etc/ssh/{account}.keys"])
+        on_local(tunnel, ["sshd", "-t"])
+        on_local(tunnel, ["systemctl", "reload", "ssh"])
+        if on_local(tunnel, ["id", account], check=False).returncode == 0:
+            on_local(tunnel, ["userdel", account])
     del tunnels[tid]
     save(servers, tunnels)
     results = tests()
@@ -247,35 +263,50 @@ def choose_id(records, label):
 
 
 def create_tunnel(servers, tunnels):
-    sid = choose_id(servers, "Server")
+    addresses = output(run(["hostname", "-I"], check=False)).split()
+    if not addresses:
+        raise RuntimeError("Cannot determine the dashboard VPS address.")
+    local_candidates = {"1": dict(host=addresses[0], user="root"), **servers}
+    for key, endpoint in local_candidates.items():
+        print(f"{key}. {endpoint['host']}" + (" (this VPS)" if key == "1" and key not in servers else ""))
+    # Existing installations may already have a peer with ID 1.
+    dashboard_id = next_id(servers) if "1" in servers else "1"
+    if dashboard_id != "1":
+        local_candidates[dashboard_id] = dict(host=addresses[0], user="root")
+        print(f"{dashboard_id}. {addresses[0]} (this VPS)")
+    local_id = choose_id(local_candidates, "Local VPS")
+    if local_id is None:
+        return
+    sid = choose_id({key: value for key, value in local_candidates.items()
+                     if key != local_id}, "Remote VPS")
     if sid is None:
         return
-    kind = input("Tunnel type [1 Forward, 2 Reverse, 0 to cancel]: ").strip()
-    if kind == "0":
+    listen = port("Local Port [e.g. 28000]: ")
+    target = port("Remote Port [e.g. 443]: ")
+    mode = input("Mode [1 Forward, 2 Reverse, 0 to cancel]: ").strip()
+    if mode == "0":
         return
-    if kind not in ("1", "2"):
+    if mode not in ("1", "2"):
         raise ValueError("Choose 1 for Forward or 2 for Reverse.")
-    kind = "Forward" if kind == "1" else "Reverse"
-    server = servers[sid]
-    name = input("Tunnel name [e.g. GR02-XRAY]: ").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
-        raise ValueError("Invalid tunnel name")
-    listen = port("Listen port [e.g. 18443]: ")
-    target = port("Target port on peer localhost [e.g. 443]: ")
-    bind = str(ipaddress.IPv4Address(input("Listen IPv4 [default 127.0.0.1, e.g. 91.216.217.244]: ").strip() or "127.0.0.1"))
-    if any(t["listen"] == listen and (t["bind"] == bind or "0.0.0.0" in (bind, t["bind"]))
-           for t in tunnels.values()):
-        raise ValueError("Listen address and port already managed")
-    with socket.socket() as test:
-        test.bind((bind, listen))
+    kind = "Forward" if mode == "1" else "Reverse"
+    server = local_candidates[sid]
+    if sid == dashboard_id:
+        server = dict(server, dashboard=True)
+    endpoint = None if local_id == dashboard_id else servers[local_id]
+    bind = "0.0.0.0"
+    if any(t["listen"] == listen and t.get("local_endpoint") == endpoint for t in tunnels.values()):
+        raise ValueError("Local Port is already managed on this VPS.")
     tid = next_id(tunnels)
-    tunnel = dict(name=name, server=sid, kind=kind, listen=listen, target=target, bind=bind)
-    if kind == "Reverse":
-        ssh_host = input("SSH address of this host from the peer [e.g. i.30na.top]: ").strip()
-        if not HOST.fullmatch(ssh_host):
-            raise ValueError("Invalid SSH address")
-        tunnel.update(account="stm-r-" + secrets.token_hex(6), ssh_host=ssh_host)
+    tunnel = dict(name=f"tunnel-{tid}", server=None if sid == dashboard_id else sid, kind=kind, listen=listen, target=target,
+                  bind=bind, local_id=local_id if endpoint else None, local_endpoint=endpoint,
+                  dashboard_target=server if sid == dashboard_id else None,
+                  account="stm-r-" + secrets.token_hex(6), ssh_host=local_candidates[local_id]["host"])
+    on_local(tunnel, ["python3", "-c",
+        "import socket,sys; s=socket.socket(); s.bind(('0.0.0.0',int(sys.argv[1])))",
+        str(listen)])
     remote(server, ["true"])
+    if kind == "Forward" and endpoint:
+        on_local(tunnel, [*SSH, f"{server['user']}@{server['host']}", "true"])
     tunnels[tid] = tunnel
     save(servers, tunnels)
     try:
@@ -291,7 +322,9 @@ def create_tunnel(servers, tunnels):
                 print(f"Tunnel {tid} started.")
                 return
             time.sleep(0.5)
-        raise RuntimeError(f"Tunnel {tid} has no listener. See Status.")
+        details = on_client(server, tunnel, ["journalctl", "-u", unit_name(tid, tunnel),
+                                              "-n", "5", "--no-pager"], check=False)
+        raise RuntimeError(f"Tunnel {tid} has no listener.\n{output(details)}")
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         print(f"Tunnel {tid} setup failed: {error}")
         try:
@@ -301,10 +334,10 @@ def create_tunnel(servers, tunnels):
 
 
 def listener(tunnel):
-    lines = output(run(["ss", "-Hlnpt", f"sport = :{tunnel['listen']}"])).splitlines()
+    lines = output(on_local(tunnel, ["ss", "-Hlnpt", f"sport = :{tunnel['listen']}"])).splitlines()
     address = f"{tunnel['bind']}:{tunnel['listen']}"
     process = '"sshd",pid=' if tunnel["kind"] == "Reverse" else '"ssh",pid='
-    return any(len(line.split()) >= 5 and line.split()[3] == address and process in line
+    return any(len(line.split()) >= 5 and line.split()[3] in (address, f"*:{tunnel['listen']}" if tunnel["bind"] == "0.0.0.0" else address) and process in line
                for line in lines)
 
 
@@ -320,7 +353,8 @@ def target_sockets(server, tunnel):
 def test_tunnel(server, tunnel, tid):
     svc = state(server, tunnel, tid)
     if tunnel["kind"] == "Forward":
-        ssh_ok = remote(server, ["true"], check=False).returncode == 0
+        ssh_ok = (svc == "UP" and listener(tunnel)) or (
+            not tunnel.get("local_endpoint") and remote(server, ["true"], check=False).returncode == 0)
     else:
         # A live reverse listener is created by the authenticated SSH session.
         ssh_ok = svc == "UP" and listener(tunnel)
@@ -330,12 +364,25 @@ def test_tunnel(server, tunnel, tid):
         address = tunnel["bind"] if tunnel["bind"] != "0.0.0.0" else "127.0.0.1"
         try:
             baseline = target_sockets(server, tunnel)
-            with socket.create_connection((address, tunnel["listen"]), timeout=3):
-                for _ in range(3):
-                    if target_sockets(server, tunnel) - baseline:
-                        path_ok = True
-                        break
-                    time.sleep(0.2)
+            if tunnel.get("local_endpoint"):
+                hold = ("import socket,sys,time; "
+                        "s=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); time.sleep(3)")
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    connection = pool.submit(on_local, tunnel,
+                                             ["python3", "-c", hold, address, str(tunnel["listen"])],
+                                             check=False)
+                    while not connection.done():
+                        if target_sockets(server, tunnel) - baseline:
+                            path_ok = connection.result().returncode == 0
+                            break
+                        time.sleep(0.25)
+            else:
+                with socket.create_connection((address, tunnel["listen"]), timeout=3):
+                    for _ in range(3):
+                        if target_sockets(server, tunnel) - baseline:
+                            path_ok = True
+                            break
+                        time.sleep(0.2)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             pass
     return dict(ssh=ssh_ok, listener=listening, tcp=path_ok,
@@ -373,7 +420,7 @@ def test_all(servers, tunnels):
     print("ID   TYPE     SSH    LISTENER  TCP    RESULT")
     for tid, tunnel in sorted(tunnels.items(), key=lambda entry: int(entry[0])):
         try:
-            result = record_test(servers.get(tunnel["server"]), tunnel, tid)
+            result = record_test(target_vps(servers, tunnel), tunnel, tid)
         except OPERATION_ERRORS as error:
             print(f"{tid:<4} {tunnel['kind']:<8} ERROR: {error}", flush=True)
             continue
@@ -408,14 +455,15 @@ def show(servers, tunnels):
 
     print("\nTUNNELS\nID   TYPE     LISTEN                 TARGET                         STATE    TEST")
     for tid, tunnel in tunnels.items():
-        server = servers.get(tunnel["server"])
+        server = target_vps(servers, tunnel)
         check = checks.get(tid)
         result = status_word(check_passed(check)) if check else "—"
-        listen = f"{tunnel['bind']}:{tunnel['listen']}"
+        local_host = (tunnel.get("local_endpoint") or {}).get("host", "LOCAL")
+        listen = f"{local_host}:{tunnel['listen']}"
         target_host = server["host"] if server else "UNKNOWN"
         target = f"{target_host}:{tunnel['target']}"
         status = "UNKNOWN"
-        if server and (tunnel["kind"] == "Forward" or server_status[tunnel["server"]] == "OK"):
+        if server and (tunnel["kind"] == "Forward" or (server.get("dashboard") or server_status.get(tunnel["server"]) == "OK")):
             try:
                 status = state(server, tunnel, tid)
             except OPERATION_ERRORS:
@@ -542,7 +590,7 @@ def server_menu(choice, servers, tunnels):
         if sid is None:
             return
         server = servers[sid]
-        related = [tid for tid, t in tunnels.items() if t["server"] == sid]
+        related = [tid for tid, t in tunnels.items() if t["server"] == sid or t.get("local_id") == sid]
         for tid in related:
             try:
                 remove_tunnel(servers, tunnels, tid)
@@ -561,7 +609,7 @@ def tunnel_menu(choice, servers, tunnels):
         active = {}
         for tid, tunnel in tunnels.items():
             try:
-                server = servers[tunnel["server"]]
+                server = target_vps(servers, tunnel)
                 current = state(server, tunnel, tid)
                 if current == "UNKNOWN":
                     print(f"Tunnel {tid}: service state unavailable.")
