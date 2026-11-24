@@ -10,8 +10,10 @@ target on the peer.
 
 Run as root on Ubuntu with systemd. Place the encrypted
 `30na-SSH-Backup.zip` at `/root/30na-SSH-Backup.zip`. The installer invokes the
-pinned SSH Infrastructure 30nA installer, asks for the ZIP password, loads
-`/root/.ssh/30na_windows`, installs the dashboard, and opens it.
+pinned SSH Infrastructure 30nA installer, asks for the ZIP password, validates the archived key pair, and restores it
+when absent. It keeps matching existing files and stops on a conflicting pair.
+It registers the public key for root only if its fingerprint is absent from
+`/root/.ssh/authorized_keys`, then loads the key and opens the installed dashboard.
 
 ```bash
 clear

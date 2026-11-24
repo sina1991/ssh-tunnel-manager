@@ -38,9 +38,48 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git openssh-client openssh-server p7zip-full python3 iproute2 util-linux coreutils
 
+register_public_key() (
+    local ssh_dir="$1"
+    local public_key="$ssh_dir/30na_windows.pub"
+    local authorized="$ssh_dir/authorized_keys"
+    local fingerprint
+
+    fingerprint="$(ssh-keygen -lf "$public_key" | awk 'NR == 1 {print $2}')"
+    [[ -n "$fingerprint" ]]
+    exec 9>"$ssh_dir/.30na-authorized-keys.lock"
+    flock 9
+    if [[ -L "$authorized" || ( -e "$authorized" && ! -f "$authorized" ) ]]; then
+        echo "Refusing unexpected authorized_keys file: $authorized" >&2
+        exit 1
+    fi
+    if [[ -s "$authorized" ]] &&
+        ssh-keygen -lf "$authorized" 2>/dev/null |
+        awk -v expected="$fingerprint" '$2 == expected {found=1} END {exit !found}'; then
+        echo "SSH public key already authorized for root."
+    else
+        touch "$authorized"
+        chmod 600 "$authorized"
+        if [[ -s "$authorized" && "$(tail -c 1 "$authorized" | wc -l)" -eq 0 ]]; then
+            printf '\n' >> "$authorized"
+        fi
+        cat "$public_key" >> "$authorized"
+        echo "SSH public key authorized for root."
+    fi
+)
+
 if [[ -z "$peer" ]]; then
     curl -fsSL "$KEY_SETUP" -o "$TMP/restore.sh"
+    existing_pair=no
+    if [[ -f /root/.ssh/30na_windows && -f /root/.ssh/30na_windows.pub ]]; then
+        existing_pair=yes
+    fi
     HOME=/root bash "$TMP/restore.sh" /root/30na-SSH-Backup.zip </dev/tty
+    if [[ "$existing_pair" == yes ]]; then
+        echo "Existing SSH key pair matches the backup."
+    else
+        echo "SSH key pair installed from the backup."
+    fi
+    register_public_key /root/.ssh
     eval "$(ssh-agent -s)"
     trap 'ssh-agent -k >/dev/null; cleanup' EXIT
     ssh-add /root/.ssh/30na_windows </dev/tty
