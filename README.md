@@ -18,8 +18,7 @@ It registers the public key for root only if its fingerprint is absent from
 
 ```bash
 clear
-curl -fsSLo /tmp/ssh-tunnel-manager-v2-install.sh https://raw.githubusercontent.com/sina1991/ssh-tunnel-manager/v2/reverse-tunnels/install.sh
-bash /tmp/ssh-tunnel-manager-v2-install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/sina1991/ssh-tunnel-manager/v2/reverse-tunnels/install.sh)
 ```
 
 Open again with `sudo bash /opt/tunnel-manager/tunnel.sh`. The installer

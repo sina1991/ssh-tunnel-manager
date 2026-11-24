@@ -101,15 +101,77 @@ if [[ -z "$peer" ]]; then
     if [[ -f /root/.ssh/30na_windows && -f /root/.ssh/30na_windows.pub ]]; then
         existing_pair=yes
     fi
-    # The pinned restore script reads the 7-Zip password from the terminal.
-    # Route that single read through a private descriptor and retain the TTY
-    # for any SSH key passphrase prompt.
-    sed -i '/^if ! "\$seven" e /s|</dev/tty|<\&8|' "$TMP/restore.sh"
-    if ! grep -Eq '^if ! "\$seven" e .*<&8; then$' "$TMP/restore.sh"; then
+    # p7zip 16.02 reads directly from a controlling terminal. Give it a
+    # private terminal so it cannot ask the person running the installer.
+    cat > "$TMP/unlock-zip.py" <<'PYTHON'
+import errno
+import os
+from pathlib import Path
+import pty
+import select
+import signal
+import sys
+import termios
+import time
+
+password = Path(os.environ["STM_PASSWORD_FILE"]).read_bytes().rstrip(b"\n")
+pid, terminal = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    finally:
+        os._exit(127)
+
+deadline = time.monotonic() + 60
+pending = b""
+sent = False
+reaped = False
+try:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([terminal], [], [], remaining)[0]:
+            raise RuntimeError("ZIP extraction timed out")
+        try:
+            chunk = os.read(terminal, 4096)
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
+            break
+        if not chunk:
+            break
+        pending = (pending + chunk)[-8192:]
+        if b"Enter password" in pending:
+            if sent:
+                raise RuntimeError("ZIP tool rejected the supplied password")
+            settings = termios.tcgetattr(terminal)
+            settings[3] &= ~termios.ECHO
+            termios.tcsetattr(terminal, termios.TCSANOW, settings)
+            os.write(terminal, password + b"\n")
+            pending = b""
+            sent = True
+    _, status = os.waitpid(pid, 0)
+    reaped = True
+    sys.exit(0 if sent and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 1)
+except (OSError, RuntimeError) as error:
+    print(f"ZIP extraction failed: {error}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    if not reaped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
+    os.close(terminal)
+PYTHON
+
+    sed -i '/^if ! "\$seven" e /s|^if ! |if ! python3 "$STM_ZIP_HELPER" |; /^if ! python3 "\$STM_ZIP_HELPER" /s| </dev/tty||' "$TMP/restore.sh"
+    if ! grep -Eq '^if ! python3 "\$STM_ZIP_HELPER" "\$seven" e .*; then$' "$TMP/restore.sh"; then
         echo "The ZIP restore script does not support the expected input handoff." >&2
         exit 1
     fi
-    HOME=/root bash "$TMP/restore.sh" "$ZIP" 8<"$password_file" </dev/tty
+    LC_ALL=C.UTF-8 HOME=/root STM_ZIP_HELPER="$TMP/unlock-zip.py" STM_PASSWORD_FILE="$password_file" \
+        bash "$TMP/restore.sh" "$ZIP" </dev/tty
     rm -f -- "$password_file"
     rmdir -- "$password_dir"
     password_dir=""
