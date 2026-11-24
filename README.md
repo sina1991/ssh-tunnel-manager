@@ -9,9 +9,11 @@ target on the peer.
 ## Install on the dashboard host
 
 Run as root on Ubuntu with systemd and nano. Place the encrypted
-`30na-SSH-Backup.zip` at `/root/30na-SSH-Backup.zip`. The installer checks the ZIP first and opens nano for the ZIP password. Save
-with Ctrl+O, Enter, then exit with Ctrl+X. Package installation starts after
-that. The pinned SSH Infrastructure 30nA installer validates the key pair and
+`30na-SSH-Backup.zip` at `/root/30na-SSH-Backup.zip`. The installer checks the ZIP and looks for
+`/root/.30na-tunnel-passwords`. If absent, nano opens with
+`zip-pass="Input Here"`. Replace the placeholder, then press Ctrl+X, Y, Enter.
+After successful restore the password is saved on the server in a root-only
+plaintext file (mode 0600) for subsequent installs. The pinned SSH Infrastructure 30nA installer validates the key pair and
 restores it when absent. It keeps matching existing files and stops on a conflicting pair.
 It registers the public key for root only if its fingerprint is absent from
 `/root/.ssh/authorized_keys`, then loads the key and opens the installed dashboard.
@@ -35,8 +37,15 @@ assigning its listener to the manager.
   authentication. Only the public key is registered on the peer. Regular
   dashboard-to-peer operations require key-based login. For unattended operations,
   the management key must work without an interactive SSH agent.
-- **Tunnels** — Add, Remove, Test one, Test all, and Status. Choose Forward or
-  Reverse when adding a tunnel. New tunnels start immediately and at boot. Use the dashboard host's public IPv4
+- **VPS Test** — Check SSH from this terminal to all registered VPSs, or test a
+  temporary Forward or Reverse path between two distinct registered VPSs.
+  Both VPSs must be manageable from the terminal and the initiating VPS
+  must already trust and authenticate to the other over SSH. The temporary
+  listener binds to loopback. Enter selects a free local port and remote port
+  22, respectively. The remote port is the service port, not the SSH port
+  setting. The temporary SSH process expires after 12 seconds.
+- **Tunnels** — Add, Remove, and Tunnel Test. Tunnel Test checks all active
+  tunnels. New tunnels start immediately and at boot. Use the dashboard host's public IPv4
   address as the listen address if it is assigned to an interface and the listener
   must accept external connections. Permit the chosen TCP port in your firewalls.
   The TCP target is `127.0.0.1` on the selected peer.
@@ -53,8 +62,8 @@ Custom sshd policies must allow public-key login for that account and load
 ## Checks
 
 The dashboard separates service state from the last connection test. The timer
-runs every 30 minutes. Test all checks both tunnel types and continues after
-a failure. Manual tests report SSH, listener, and TCP path. TCP path
+runs every 30 minutes. Tunnel Test checks active tunnels of both types and continues
+after a failure. Manual tests report SSH, listener, and TCP path. TCP path
 testing opens the listener and checks for a new established loopback socket at
 the target while holding the connection. This probe expects services that leave
 the TCP session open long enough to observe and can be affected by simultaneous
@@ -152,22 +161,10 @@ VPS ID > 2
 Removed VPS 2 and its associated tunnels.
 ```
 
-**VPS Test** دسترسی از همین ترمینال و امکان Forward و Reverse را جداگانه تست
-می‌کند. نتیجهٔ `OK` در هر جهت یعنی تونل آزمایشی ساخته شده و اتصال TCP از آن
-عبور کرده است.
-
-```text
-VPS TEST
-2. gr02.30na.top
-3. uk5.30na.top
-0. Back
-
-VPS ID > 2
-
-SSH from this terminal     IRAN → GR02   OK
-Forward Test (SSH starts)  IRAN → GR02   OK
-Reverse Test (SSH starts)  GR02 → IRAN   OK
-```
+**VPS Test** دو گزینه دارد. گزینهٔ اول SSH همهٔ VPSها را از همین ترمینال
+بررسی می‌کند. گزینهٔ دوم با انتخاب شمارهٔ Local VPS و Remote VPS، پورت‌ها و
+Mode، یک تونل آزمایشی می‌سازد. اگر پورت Local را خالی بگذاری، یک پورت آزاد
+انتخاب می‌شود. پیش‌فرض پورت سرویس Remote برابر `22` است.
 
 ### ۳. منوی Tunnel
 
@@ -175,6 +172,7 @@ Reverse Test (SSH starts)  GR02 → IRAN   OK
 TUNNEL
 1. Add Tunnel
 2. Remove Tunnel
+3. Tunnel Test
 0. Back
 
 Select > 1
@@ -227,3 +225,5 @@ REMOVE TUNNEL
 Tunnel ID > 4
 Tunnel 4 removed.
 ```
+
+**Tunnel Test** همهٔ تونل‌های فعال را بررسی می‌کند.

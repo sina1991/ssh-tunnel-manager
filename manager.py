@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 
@@ -452,17 +453,95 @@ def add_server(servers, tunnels):
     save(servers, tunnels)
 
 
+def optional_port(label, default):
+    value = input(label).strip()
+    if not value:
+        return default
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 65535:
+        raise ValueError("Port must be 1–65535.")
+    return int(value)
+
+
+def test_vps(servers):
+    if not servers:
+        print("No VPS configured.")
+        return
+    choice = input("VPS Test [1 All SSH connections, 2 Two VPSs, 0 Back]: ").strip()
+    if choice == "0":
+        return
+    if choice == "1":
+        for sid, server in servers.items():
+            try:
+                result = remote(server, ["true"], check=False)
+                detail = result.stderr.decode(errors="replace").strip()
+                print(f"{sid} {server['host']}: {status_word(result.returncode == 0)}"
+                      + (f" — {detail}" if result.returncode and detail else ""))
+            except OPERATION_ERRORS as error:
+                print(f"{sid} {server['host']}: FAIL — {error}")
+        return
+    if choice != "2":
+        raise ValueError("Choose 1, 2, or 0.")
+    local_id = choose_id(servers, "Local VPS")
+    if local_id is None:
+        return
+    remote_id = choose_id({sid: server for sid, server in servers.items() if sid != local_id}, "Remote VPS")
+    if remote_id is None:
+        return
+    local, peer = servers[local_id], servers[remote_id]
+    listen = optional_port("Local test port [Enter = free port, e.g. 28443]: ", 0)
+    target = optional_port("Remote service port [Enter = 22, e.g. 443]: ", 22)
+    mode = input("Mode [1 Forward, 2 Reverse, 0 Back]: ").strip()
+    if mode == "0":
+        return
+    if mode not in ("1", "2"):
+        raise ValueError("Choose 1 for Forward or 2 for Reverse.")
+
+    free_port = ("import socket; s=socket.socket(); "
+                 "s.bind(('127.0.0.1',int(__import__('sys').argv[1]))); print(s.getsockname()[1])")
+    listen = int(output(remote(local, ["python3", "-c", free_port, str(listen)])))
+    target_check = ("import socket,sys; "
+                    "socket.create_connection(('127.0.0.1',int(sys.argv[1])),3).close()")
+    remote(peer, ["python3", "-c", target_check, str(target)])
+    baseline = target_sockets(peer, {"target": target})
+    source, destination = (local, peer) if mode == "1" else (peer, local)
+    direction = "-L" if mode == "1" else "-R"
+    command = ["timeout", "12", *SSH, "-NT", "-o", "ExitOnForwardFailure=yes",
+               direction, f"127.0.0.1:{listen}:127.0.0.1:{target}",
+               f"{destination['user']}@{destination['host']}"]
+    print(f"SSH: {source['host']} → {destination['host']}")
+    print(f"TCP: {local['host']}:{listen} → {peer['host']}:{target}")
+    hold = ("import socket,sys,time; "
+            "s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),2); "
+            "print('CONNECTED',flush=True); time.sleep(3)")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        session = pool.submit(remote, source, command, check=False)
+        for _ in range(3):
+            if session.done():
+                break
+            probe = pool.submit(remote, local, ["python3", "-c", hold, str(listen)], check=False)
+            while not probe.done() and not session.done():
+                if target_sockets(peer, {"target": target}) - baseline:
+                    if probe.result().returncode == 0:
+                        print("Tunnel path: OK")
+                        return
+                    break
+                time.sleep(0.25)
+            time.sleep(0.25)
+        result = session.result()
+        detail = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(detail or "Tunnel path verification failed.")
+
+
 def server_menu(choice, servers, tunnels):
     if choice == "1":
         add_server(servers, tunnels)
-    elif choice in ("2", "3"):
+    elif choice == "3":
+        test_vps(servers)
+    elif choice == "2":
         sid = choose_id(servers, "Server")
         if sid is None:
             return
         server = servers[sid]
-        if choice == "3":
-            print(status_word(remote(server, ["true"], check=False).returncode == 0))
-            return
         related = [tid for tid, t in tunnels.items() if t["server"] == sid]
         for tid in related:
             try:
@@ -478,38 +557,35 @@ def tunnel_menu(choice, servers, tunnels):
     if choice == "1":
         create_tunnel(servers, tunnels)
         return
-    if choice == "4":
-        test_all(servers, tunnels)
+    if choice == "3":
+        active = {}
+        for tid, tunnel in tunnels.items():
+            try:
+                server = servers[tunnel["server"]]
+                current = state(server, tunnel, tid)
+                if current == "UNKNOWN":
+                    print(f"Tunnel {tid}: service state unavailable.")
+                if current == "UP":
+                    active[tid] = tunnel
+            except OPERATION_ERRORS as error:
+                print(f"Tunnel {tid}: service state unavailable — {error}")
+        if active:
+            test_all(servers, active)
+        else:
+            print("No active tunnels to test.")
         return
     tid = choose_id(tunnels, "Tunnel")
-    if tid is None:
-        return
-    tunnel = tunnels[tid]
-    server = servers.get(tunnel["server"])
-    if choice == "3":
-        result = record_test(server, tunnel, tid)
-        for name in ("ssh", "listener", "tcp"):
-            print(f"{name.upper()}: {status_word(result[name])}")
-        if result.get("error"):
-            print(f"Error: {result['error']}")
-        print(f"Checked: {result['checked']}")
-    elif server is None:
-        raise ValueError("Associated server is missing.")
-    elif choice == "2":
+    if tid is not None:
         remove_tunnel(servers, tunnels, tid)
         print(f"Tunnel {tid} removed.")
-    else:
-        status = unit_action(server, tunnel, tid, ["status", "--no-pager", "--lines=8"], check=False)
-        details = output(status) or status.stderr.decode(errors="replace").strip()
-        print(details or "Service status unavailable.")
 
 
 MENUS = {
     "home": ("Main menu", "1. Servers\n2. Tunnels\n0. Exit", {"0", "1", "2"}),
     "servers": ("Servers", "1. Add server\n2. Remove server\n3. Test SSH\n0. Back",
                 {"0", "1", "2", "3"}),
-    "tunnels": ("Tunnels", "1. Add tunnel\n2. Remove tunnel\n3. Test one tunnel\n"
-                "4. Test all tunnels\n5. Status\n0. Back", {"0", "1", "2", "3", "4", "5"}),
+    "tunnels": ("Tunnel", "1. Add Tunnel\n2. Remove Tunnel\n3. Tunnel Test\n0. Back",
+                {"0", "1", "2", "3"}),
 }
 
 

@@ -30,8 +30,12 @@ fi
 
 TMP="$(mktemp -d)"
 password_dir=""
+password_dir_runtime=""
 installer_agent=""
 cleanup() {
+    if [[ -n "$password_dir_runtime" ]]; then
+        rm -rf -- "$password_dir_runtime"
+    fi
     if [[ -n "$password_dir" ]]; then
         rm -rf -- "$password_dir"
     fi
@@ -46,17 +50,31 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 if [[ -z "$peer" ]]; then
-    if ! command -v nano >/dev/null 2>&1; then
-        echo "Install nano first, then rerun the installer." >&2
+    password_config=/root/.30na-tunnel-passwords
+    if [[ -L "$password_config" || ( -e "$password_config" && ! -f "$password_config" ) ]]; then
+        echo "Invalid password file: $password_config" >&2
         exit 1
     fi
-    password_dir="$(mktemp -d /dev/shm/tunnel-manager-password.XXXXXXXX)"
-    password_file="$password_dir/zip-password.txt"
-    : > "$password_file"
-    echo "Enter only the ZIP password in nano. Save with Ctrl+O, Enter, then exit with Ctrl+X."
-    nano -I "$password_file" </dev/tty >/dev/tty
-    if ! awk 'NR > 1 {exit 1} NR == 1 {valid = length($0) > 0} END {if (!valid) exit 1}' "$password_file"; then
-        echo "Enter the ZIP password on one line. Installation cancelled." >&2
+    if [[ ! -e "$password_config" ]]; then
+        command -v nano >/dev/null || { echo "Install nano first." >&2; exit 1; }
+        password_dir="$(mktemp -d /root/.30na-password.XXXXXXXX)"
+        printf 'zip-pass="Input Here"\n' > "$password_dir/passwords"
+        echo "Set zip-pass in nano. Press Ctrl+X, Y, then Enter."
+        nano -I "$password_dir/passwords" </dev/tty >/dev/tty
+        config_input="$password_dir/passwords"
+    else
+        config_input="$password_config"
+    fi
+    chmod 600 "$config_input"
+    password_dir_runtime="$(mktemp -d /dev/shm/tunnel-manager-password.XXXXXXXX)"
+    password_file="$password_dir_runtime/zip-password.txt"
+    if ! awk '
+        NR == 1 && /^zip-pass="[^"]+"$/ && $0 != "zip-pass=\"Input Here\"" {
+            password = substr($0, 11, length($0) - 11)
+        }
+        END {if (NR != 1 || password == "") exit 1; print password}
+    ' "$config_input" > "$password_file"; then
+        echo "Set zip-pass=\"your ZIP password\" in $password_config." >&2
         exit 1
     fi
 fi
@@ -181,8 +199,11 @@ PYTHON
         exit 1
     fi
     rm -f -- "$password_file"
-    rmdir -- "$password_dir"
-    password_dir=""
+    rmdir -- "$password_dir_runtime"
+    password_dir_runtime=""
+    if [[ "$config_input" != "$password_config" ]]; then
+        ln -- "$config_input" "$password_config"
+    fi
     if [[ "$existing_pair" == yes ]]; then
         echo "Existing SSH key pair matches the backup."
     else
@@ -195,9 +216,19 @@ PYTHON
 fi
 
 echo "==> Downloading project"
-git clone --quiet --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"
+for attempt in 1 2 3; do
+    if git -c http.version=HTTP/1.1 clone --quiet --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"; then
+        break
+    fi
+    rm -rf -- "$TMP/repo"
+    if [[ "$attempt" == 3 ]]; then
+        echo "Could not download project after three attempts." >&2
+        exit 1
+    fi
+    sleep "$attempt"
+done
 if [[ -n "$revision" && "$(git -C "$TMP/repo" rev-parse HEAD)" != "$revision" ]]; then
-    git -C "$TMP/repo" fetch --quiet --depth 1 origin "$revision"
+    git -c http.version=HTTP/1.1 -C "$TMP/repo" fetch --quiet --depth 1 origin "$revision"
     git -C "$TMP/repo" checkout --quiet --detach "$revision"
 fi
 git -C "$TMP/repo" rev-parse HEAD > "$TMP/revision"
