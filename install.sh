@@ -3,7 +3,13 @@ set -Eeuo pipefail
 umask 077
 
 REPO="https://github.com/sina1991/ssh-tunnel-manager.git"
-BRANCH="main"
+BRANCH="v2/reverse-tunnels"
+KEY_SETUP="https://raw.githubusercontent.com/sina1991/How-to/5cd85860aa6a7bc5de3bb7e9701bb18d302df987/SSH-Infrastructure-30nA/install.sh"
+peer="${1:-}"
+revision="${2:-}"
+if [[ -n "$peer" ]]; then
+    [[ "$peer" == --peer && "$revision" =~ ^[0-9a-f]{40}$ && $# -eq 2 ]] || exit 2
+fi
 BASE="/opt/tunnel-manager"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -22,13 +28,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -z "$peer" && ! -f /root/30na-SSH-Backup.zip ]]; then
+    echo "Place the encrypted backup at /root/30na-SSH-Backup.zip and run the installer again." >&2
+    exit 1
+fi
+
 echo "==> Installing prerequisites"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y git openssh-client util-linux coreutils
+apt-get install -y curl git openssh-client openssh-server p7zip-full python3 iproute2 util-linux coreutils
+
+if [[ -z "$peer" ]]; then
+    curl -fsSL "$KEY_SETUP" -o "$TMP/restore.sh"
+    HOME=/root bash "$TMP/restore.sh" /root/30na-SSH-Backup.zip </dev/tty
+    eval "$(ssh-agent -s)"
+    trap 'ssh-agent -k >/dev/null; cleanup' EXIT
+    ssh-add /root/.ssh/30na_windows </dev/tty
+fi
 
 echo "==> Downloading project"
 git clone --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"
+if [[ -n "$revision" && "$(git -C "$TMP/repo" rev-parse HEAD)" != "$revision" ]]; then
+    git -C "$TMP/repo" fetch --depth 1 origin "$revision"
+    git -C "$TMP/repo" checkout --detach "$revision"
+fi
+git -C "$TMP/repo" rev-parse HEAD > "$TMP/revision"
+
+for file in tunnel.sh health-check.sh install.sh; do
+    bash -n "$TMP/repo/$file"
+done
+python3 -m py_compile "$TMP/repo/manager.py"
 
 echo "==> Installing application files"
 install -d -o root -g root -m 0750 "$BASE"
@@ -47,6 +76,7 @@ for file in common.sh servers.sh systemd.sh tunnels.sh; do
     install -o root -g root -m 0640 "$TMP/repo/lib/$file" "$BASE/lib/$file"
 done
 
+install -o root -g root -m 0640 "$TMP/repo/manager.py" "$BASE/manager.py"
 install -o root -g root -m 0644 "$TMP/repo/README.md" "$BASE/README.md"
 install -o root -g root -m 0644 "$TMP/repo/.gitignore" "$BASE/.gitignore"
 
@@ -89,44 +119,11 @@ Unit=tunnel-health-check.service
 WantedBy=timers.target
 UNIT
 
-echo "==> Validating shell scripts"
-bash -n "$BASE/install.sh"
-bash -n "$BASE/tunnel.sh"
-bash -n "$BASE/health-check.sh"
-for file in "$BASE"/lib/*.sh; do
-    bash -n "$file"
-done
-
-echo "==> Reloading systemd and enabling health checks"
 systemctl daemon-reload
 systemctl enable --now tunnel-health-check.timer
+install -o root -g root -m 0640 "$TMP/revision" "$BASE/revision"
+echo "Installed SSH Tunnel Manager v2 at $BASE"
 
-echo "==> Running initial health check"
-if ! systemctl start tunnel-health-check.service; then
-    echo "WARNING: Initial health check failed. Inspect its journal:"
-    echo "  journalctl -u tunnel-health-check.service -n 50 --no-pager"
-fi
-
-echo
-echo "========== INSTALLATION SUMMARY =========="
-echo "Application: $BASE"
-echo "Dashboard:   $BASE/tunnel.sh"
-echo "Health timer:"
-systemctl is-active tunnel-health-check.timer || true
-echo
-echo "Installed files:"
-ls -l "$BASE/tunnel.sh" "$BASE/health-check.sh" "$BASE/lib"
-echo
-echo "Runtime databases:"
-ls -l "$BASE/data"
-echo
-echo "To open the dashboard:"
-echo "  sudo bash $BASE/tunnel.sh"
-
-if [[ -t 1 && -r /dev/tty ]]; then
-    echo
-    read -r -p "Open dashboard now? [Y/n] " answer </dev/tty
-    if [[ ! "$answer" =~ ^[nN]$ ]]; then
-        exec bash "$BASE/tunnel.sh" </dev/tty
-    fi
+if [[ -z "$peer" ]]; then
+    bash "$BASE/tunnel.sh" </dev/tty
 fi
