@@ -65,3 +65,165 @@ and VPN egress from the actual client.
 systemctl status tunnel-health-check.timer --no-pager
 journalctl -u tunnel-health-check.service -n 50 --no-pager
 ```
+
+## 30nA-TUNNEL v2.0.0 — راهنمای کاربر
+
+این بخش طرح تأییدشدهٔ CLI است. نمونه‌ها رفتار مورد انتظار نسخهٔ `30na-tunnel.sh`
+را نشان می‌دهند. برای نصب و اجرای نسخهٔ فعلی از بخش Install بالا استفاده کن.
+
+```mermaid
+flowchart TD
+    Start["30na-tunnel.sh"] --> Main["Main menu"]
+    Main -->|1| VPS["VPS"]
+    Main -->|2| Tunnel["Tunnel"]
+    VPS --> VActions["Add · Remove · Test"]
+    Tunnel --> TActions["Add · Remove"]
+    TActions -->|Add| Endpoints["Select VPSs and ports"]
+    Endpoints --> Mode["1. Forward · 2. Reverse"]
+    classDef default fill:#fff,stroke:#000,color:#000
+    linkStyle default stroke:#000
+```
+
+### ۱. صفحه اصلی
+
+با هر انتخاب، صفحه پاک می‌شود و وضعیت VPSها و تونل‌های فعال بالای صفحهٔ بعدی
+دوباره نمایش داده می‌شود. نمونه‌های بعدی فقط بخش پایین صفحه را نشان می‌دهند.
+
+```text
+30nA-TUNNEL v2.0.0
+
+STATUS
+HOST             VPS         IP              DNS CHECK
+i.30na.top       vps-56001   91.216.217.244   OK (09:42)
+
+VPS
+ID   HOST             SSH
+1    i.30na.top       LOCAL
+2    gr02.30na.top    OK
+3    uk5.30na.top     OK
+
+ACTIVE TUNNELS
+ID   MODE      LISTEN      TARGET
+1    Forward   IRAN:443    UK5:443
+2    Forward   IRAN:4443   UK5:443
+3    Forward   IRAN:6677   UK5:443
+
+1. VPS
+2. Tunnel
+0. Exit
+
+Select > 1
+```
+
+### ۲. منوی VPS
+
+```text
+VPS
+1. Add New VPS
+2. Remove VPS
+3. VPS Test
+0. Back
+
+Select > 3
+```
+
+**Add New VPS** دامنه یا IP را می‌گیرد، با `root` متصل می‌شود، پروژه را روی VPS
+نصب می‌کند و شمارهٔ ثبت‌شده را نشان می‌دهد.
+
+```text
+ADD NEW VPS
+VPS address [e.g. gr02.30na.top] > gr02.30na.top
+SSH from this terminal: OK
+30nA-TUNNEL installation: OK
+VPS ID: 2
+```
+
+**Remove VPS** با شناسهٔ VPS، تونل‌های وابسته و سپس رکورد VPS را حذف می‌کند.
+اگر حذف تونلی خطا بدهد، شناسهٔ آن نمایش داده می‌شود و رکورد VPS برای تلاش مجدد
+باقی می‌ماند.
+
+```text
+REMOVE VPS
+2. gr02.30na.top
+3. uk5.30na.top
+0. Back
+
+VPS ID > 2
+Removed VPS 2 and its associated tunnels.
+```
+
+**VPS Test** دسترسی از همین ترمینال و امکان Forward و Reverse را جداگانه تست
+می‌کند. نتیجهٔ `OK` در هر جهت یعنی تونل آزمایشی ساخته شده و اتصال TCP از آن
+عبور کرده است.
+
+```text
+VPS TEST
+2. gr02.30na.top
+3. uk5.30na.top
+0. Back
+
+VPS ID > 2
+
+SSH from this terminal     IRAN → GR02   OK
+Forward Test (SSH starts)  IRAN → GR02   OK
+Reverse Test (SSH starts)  GR02 → IRAN   OK
+```
+
+### ۳. منوی Tunnel
+
+```text
+TUNNEL
+1. Add Tunnel
+2. Remove Tunnel
+0. Back
+
+Select > 1
+```
+
+**Add Tunnel** ابتدا شمارهٔ دو VPS و دو پورت را می‌گیرد و سپس حالت را می‌پرسد.
+**Local VPS** محل پورت ورودی کاربران است و **Remote VPS** میزبان سرویس مقصد
+است. `Mode` مشخص می‌کند کدام VPS اتصال SSH را آغاز کند.
+
+```text
+ADD TUNNEL
+1. IRAN  i.30na.top
+2. GR02  gr02.30na.top
+3. UK5   uk5.30na.top
+0. Back
+
+Local VPS ID > 1
+Remote VPS ID > 2
+Local port [e.g. 18443] > 18443
+Remote port [e.g. 443] > 443
+Mode [1. Forward / 2. Reverse] > 2
+
+Tunnel created: 4
+Listener: IRAN:18443
+Target:   GR02:443
+Mode:     Reverse (SSH starts on GR02)
+Status:   UP
+```
+
+| Mode | جهت اتصال SSH | مسیر ترافیک کاربر |
+|---|---|---|
+| `1. Forward` | Local VPS → Remote VPS | Local Port → Remote Port |
+| `2. Reverse` | Remote VPS → Local VPS | Local Port → Remote Port |
+
+در مثال Reverse، کاربر به `i.30na.top:18443` وصل می‌شود و ترافیک به
+Xray روی `GR02:443` می‌رسد. برای نمونهٔ Forward به UK5، شمارهٔ Local را `1`،
+شمارهٔ Remote را `3` و Mode را `1` انتخاب کن.
+
+**Remove Tunnel** فهرست شماره‌دار تونل‌ها را نشان می‌دهد و تونل انتخاب‌شده
+را حذف می‌کند.
+
+```text
+REMOVE TUNNEL
+1. Forward   IRAN:443     → UK5:443
+2. Forward   IRAN:4443    → UK5:443
+3. Forward   IRAN:6677    → UK5:443
+4. Reverse   IRAN:18443   → GR02:443
+0. Back
+
+Tunnel ID > 4
+Tunnel 4 removed.
+```
