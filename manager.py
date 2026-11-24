@@ -19,6 +19,7 @@ BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 USER = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+OPERATION_ERRORS = (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
        "-o", "StrictHostKeyChecking=yes"]
 
@@ -232,15 +233,35 @@ def port(label):
     return value
 
 
-def create_tunnel(servers, tunnels, kind):
-    sid = input("Server ID: ").strip()
+def choose_id(records, label):
+    if not records:
+        raise ValueError(f"No {label.lower()}s configured.")
+    choices = ", ".join(sorted(records, key=int))
+    value = input(f"{label} ID [{choices}; 0 to cancel]: ").strip()
+    if value == "0":
+        return None
+    if value not in records:
+        raise ValueError(f"Choose a {label.lower()} ID from the list: {choices}.")
+    return value
+
+
+def create_tunnel(servers, tunnels):
+    sid = choose_id(servers, "Server")
+    if sid is None:
+        return
+    kind = input("Tunnel type [1 Forward, 2 Reverse, 0 to cancel]: ").strip()
+    if kind == "0":
+        return
+    if kind not in ("1", "2"):
+        raise ValueError("Choose 1 for Forward or 2 for Reverse.")
+    kind = "Forward" if kind == "1" else "Reverse"
     server = servers[sid]
-    name = input("Tunnel name: ").strip()
+    name = input("Tunnel name [e.g. GR02-XRAY]: ").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
         raise ValueError("Invalid tunnel name")
-    listen = port("Listen port: ")
-    target = port("Target port on localhost: ")
-    bind = str(ipaddress.IPv4Address(input("Listen IPv4 [127.0.0.1]: ").strip() or "127.0.0.1"))
+    listen = port("Listen port [e.g. 18443]: ")
+    target = port("Target port on peer localhost [e.g. 443]: ")
+    bind = str(ipaddress.IPv4Address(input("Listen IPv4 [default 127.0.0.1, e.g. 91.216.217.244]: ").strip() or "127.0.0.1"))
     if any(t["listen"] == listen and (t["bind"] == bind or "0.0.0.0" in (bind, t["bind"]))
            for t in tunnels.values()):
         raise ValueError("Listen address and port already managed")
@@ -249,7 +270,7 @@ def create_tunnel(servers, tunnels, kind):
     tid = next_id(tunnels)
     tunnel = dict(name=name, server=sid, kind=kind, listen=listen, target=target, bind=bind)
     if kind == "Reverse":
-        ssh_host = input("SSH address of this server (reachable from the peer): ").strip()
+        ssh_host = input("SSH address of this host from the peer [e.g. i.30na.top]: ").strip()
         if not HOST.fullmatch(ssh_host):
             raise ValueError("Invalid SSH address")
         tunnel.update(account="stm-r-" + secrets.token_hex(6), ssh_host=ssh_host)
@@ -325,41 +346,86 @@ def tests():
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def check_passed(result):
+    return not result.get("error") and all(result[name] for name in ("ssh", "listener", "tcp"))
+
+
 def record_test(server, tunnel, tid):
-    result = test_tunnel(server, tunnel, tid)
+    try:
+        if server is None:
+            raise RuntimeError("Associated server is missing")
+        result = test_tunnel(server, tunnel, tid)
+    except OPERATION_ERRORS as error:
+        result = dict(ssh=False, listener=False, tcp=False, error=str(error),
+                      checked=time.strftime("%Y-%m-%d %H:%M:%S %Z"))
     results = tests()
     results[tid] = result
     atomic_write(DATA / "checks.json", json.dumps(results))
     return result
 
 
+def test_all(servers, tunnels):
+    if not tunnels:
+        print("No tunnels configured.")
+        return True
+    passed = 0
+    print("ID   TYPE     SSH    LISTENER  TCP    RESULT")
+    for tid, tunnel in sorted(tunnels.items(), key=lambda entry: int(entry[0])):
+        try:
+            result = record_test(servers.get(tunnel["server"]), tunnel, tid)
+        except OPERATION_ERRORS as error:
+            print(f"{tid:<4} {tunnel['kind']:<8} ERROR: {error}", flush=True)
+            continue
+        ok = check_passed(result)
+        passed += int(ok)
+        print(f"{tid:<4} {tunnel['kind']:<8} {status_word(result['ssh']):<6} "
+              f"{status_word(result['listener']):<9} {status_word(result['tcp']):<6} "
+              f"{status_word(ok)}", flush=True)
+        if result.get("error"):
+            print(f"     {result['error']}", flush=True)
+    print(f"\n{passed}/{len(tunnels)} passed.")
+    return passed == len(tunnels)
+
+
 def status_word(ok):
     return "OK" if ok else "FAIL"
 
 
-def show(servers, tunnels, *, show_servers=True, show_tunnels=True):
-    if show_servers:
-        print("\nSERVERS\nID   HOST                           SSH")
-        for sid, server in servers.items():
+def show(servers, tunnels):
+    checks = tests()
+    server_status = {}
+    print("\nSERVERS\nID   HOST                           SSH")
+    for sid, server in servers.items():
+        try:
             ok = remote(server, ["true"], check=False).returncode == 0
-            print(f"{sid:<4} {server['host']:<30} {status_word(ok)}")
-    if show_tunnels:
-        checks = tests()
-        print("\nTUNNELS\nID   TYPE     LISTEN                 TARGET                         STATE    TEST")
-        for tid, tunnel in tunnels.items():
-            server = servers.get(tunnel["server"])
-            if server is None:
-                continue
-            check = checks.get(tid)
-            result = status_word(all(check[k] for k in ("ssh", "listener", "tcp"))) if check else "—"
-            listen = f"{tunnel['bind']}:{tunnel['listen']}"
-            target = f"{server['host']}:{tunnel['target']}"
-            status = state(server, tunnel, tid)
-            print(f"{tid:<4} {tunnel['kind']:<8} {listen:<22} {target:<30} {status:<8} {result}")
+            server_status[sid] = status_word(ok)
+        except OPERATION_ERRORS:
+            server_status[sid] = "UNKNOWN"
+        print(f"{sid:<4} {server['host']:<30} {server_status[sid]}")
+    if not servers:
+        print("No servers configured.")
+
+    print("\nTUNNELS\nID   TYPE     LISTEN                 TARGET                         STATE    TEST")
+    for tid, tunnel in tunnels.items():
+        server = servers.get(tunnel["server"])
+        check = checks.get(tid)
+        result = status_word(check_passed(check)) if check else "—"
+        listen = f"{tunnel['bind']}:{tunnel['listen']}"
+        target_host = server["host"] if server else "UNKNOWN"
+        target = f"{target_host}:{tunnel['target']}"
+        status = "UNKNOWN"
+        if server and (tunnel["kind"] == "Forward" or server_status[tunnel["server"]] == "OK"):
+            try:
+                status = state(server, tunnel, tid)
+            except OPERATION_ERRORS:
+                pass
+        print(f"{tid:<4} {tunnel['kind']:<8} {listen:<22} {target:<30} {status:<8} {result}")
+    if not tunnels:
+        print("No tunnels configured.")
 
 
 def add_server(servers, tunnels):
-    host = input("Server address: ").strip()
+    host = input("Server address [e.g. gr02.30na.top]: ").strip()
     if not HOST.fullmatch(host):
         raise ValueError("Invalid server address")
     existing = next((sid for sid, server in servers.items() if server["host"] == host), None)
@@ -390,7 +456,9 @@ def server_menu(choice, servers, tunnels):
     if choice == "1":
         add_server(servers, tunnels)
     elif choice in ("2", "3"):
-        sid = input("Server ID: ").strip()
+        sid = choose_id(servers, "Server")
+        if sid is None:
+            return
         server = servers[sid]
         if choice == "3":
             print(status_word(remote(server, ["true"], check=False).returncode == 0))
@@ -406,71 +474,89 @@ def server_menu(choice, servers, tunnels):
         print(f"Server removed with {len(related)} tunnel(s).")
 
 
-def tunnel_menu(choice, servers, tunnels, kind):
+def tunnel_menu(choice, servers, tunnels):
     if choice == "1":
-        create_tunnel(servers, tunnels, kind)
-    elif choice in ("2", "3", "4", "5", "6"):
-        tid = input("Tunnel ID: ").strip()
-        tunnel = tunnels[tid]
-        if kind != tunnel["kind"]:
-            raise ValueError("Select a tunnel from this section")
-        server = servers[tunnel["server"]]
-        if choice == "2":
-            remove_tunnel(servers, tunnels, tid)
-        elif choice == "3":
-            check = record_test(server, tunnel, tid)
-            for name in ("ssh", "listener", "tcp"):
-                print(f"{name.upper()}: {status_word(check[name])}")
-            print(f"Checked: {check['checked']}")
-        elif choice == "4":
-            print(output(unit_action(server, tunnel, tid,
-                                     ["status", "--no-pager", "--lines=8"], check=False)))
-        else:
-            action = "enable" if choice == "5" else "disable"
-            unit_action(server, tunnel, tid, [action, "--now"])
-            print(state(server, tunnel, tid))
+        create_tunnel(servers, tunnels)
+        return
+    if choice == "4":
+        test_all(servers, tunnels)
+        return
+    tid = choose_id(tunnels, "Tunnel")
+    if tid is None:
+        return
+    tunnel = tunnels[tid]
+    server = servers.get(tunnel["server"])
+    if choice == "3":
+        result = record_test(server, tunnel, tid)
+        for name in ("ssh", "listener", "tcp"):
+            print(f"{name.upper()}: {status_word(result[name])}")
+        if result.get("error"):
+            print(f"Error: {result['error']}")
+        print(f"Checked: {result['checked']}")
+    elif server is None:
+        raise ValueError("Associated server is missing.")
+    elif choice == "2":
+        remove_tunnel(servers, tunnels, tid)
+        print(f"Tunnel {tid} removed.")
+    else:
+        status = unit_action(server, tunnel, tid, ["status", "--no-pager", "--lines=8"], check=False)
+        details = output(status) or status.stderr.decode(errors="replace").strip()
+        print(details or "Service status unavailable.")
+
+
+MENUS = {
+    "home": ("Main menu", "1. Servers\n2. Tunnels\n0. Exit", {"0", "1", "2"}),
+    "servers": ("Servers", "1. Add server\n2. Remove server\n3. Test SSH\n0. Back",
+                {"0", "1", "2", "3"}),
+    "tunnels": ("Tunnels", "1. Add tunnel\n2. Remove tunnel\n3. Test one tunnel\n"
+                "4. Test all tunnels\n5. Status\n0. Back", {"0", "1", "2", "3", "4", "5"}),
+}
+
+
+def clear_screen():
+    if sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb":
+        print("\033[2J\033[H", end="", flush=True)
+
+
+def display(section, servers, tunnels):
+    clear_screen()
+    addresses = output(run(["hostname", "-I"], check=False)).split()
+    address = next(iter(addresses), "—")
+    print(f"SSH TUNNEL MANAGER v2  ·  {socket.gethostname()}  ·  {address}")
+    show(servers, tunnels)
+    print(f"\n{MENUS[section][0].upper()}")
 
 
 def cli():
     section = "home"
-    while True:
-        try:
+    try:
+        while True:
             servers, tunnels = load()
-            if section == "home":
-                addresses = output(run(["hostname", "-I"], check=False)).split()
-                address = next(iter(addresses), "—")
-                print(f"\nSSH TUNNEL MANAGER v2  ·  {socket.gethostname()}  ·  {address}")
-                show(servers, tunnels)
-                choice = input("\n1. Servers\n2. Tunnels\n0. Exit\nSelect > ").strip()
-                if choice == "0":
-                    return
-                section = {"1": "servers", "2": "select"}.get(choice, "home")
-            elif section == "select":
-                choice = input("\nTUNNELS\n21. Forward (-L)\n22. Reverse (-R)\n 0. Back\nSelect > ").strip()
-                section = {"21": "Forward", "22": "Reverse", "0": "home"}.get(choice, section)
-            elif section == "servers":
-                show(servers, tunnels, show_tunnels=False)
-                choice = input("\n1. Add server\n2. Remove server\n3. Test SSH\n0. Back\nSelect > ").strip()
-                if choice == "0":
-                    section = "home"
-                else:
-                    with locked():
-                        server_menu(choice, *load())
-            else:
-                print(f"\n{section.upper()} TUNNELS")
-                show(servers, {k: v for k, v in tunnels.items() if v["kind"] == section},
-                     show_servers=False)
-                choice = input("\n1. Add tunnel\n2. Remove tunnel\n3. Test tunnel\n4. Status\n"
-                               "5. Enable and start\n6. Disable and stop\n0. Back\nSelect > ").strip()
-                if choice == "0":
-                    section = "select"
-                else:
-                    with locked():
-                        tunnel_menu(choice, *load(), section)
-        except (EOFError, KeyboardInterrupt):
-            return
-        except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError) as error:
-            print(f"Error: {error}", file=sys.stderr)
+            display(section, servers, tunnels)
+            _, menu, choices = MENUS[section]
+            print(menu)
+            choice = input("Select > ").strip()
+            if section == "home" and choice == "0":
+                clear_screen()
+                return
+            if choice == "0":
+                section = "home"
+                continue
+            if section == "home" and choice in {"1", "2"}:
+                section = "servers" if choice == "1" else "tunnels"
+                continue
+            display(section, servers, tunnels)
+            try:
+                if choice not in choices:
+                    raise ValueError("Choose one of the numbered options.")
+                action = server_menu if section == "servers" else tunnel_menu
+                with locked():
+                    action(choice, *load())
+            except OPERATION_ERRORS as error:
+                print(f"Error: {error}", file=sys.stderr)
+            input("\nEnter to return > ")
+    except (EOFError, KeyboardInterrupt):
+        return
 
 
 def main():
@@ -478,16 +564,9 @@ def main():
         sys.exit("Run as root.")
     os.umask(0o077)
     if sys.argv[1:] == ["--health"]:
-        failed = False
         with locked():
-            servers, tunnels = load()
-            for tid, tunnel in tunnels.items():
-                try:
-                    record_test(servers[tunnel["server"]], tunnel, tid)
-                except (KeyError, OSError, RuntimeError, subprocess.SubprocessError) as error:
-                    failed = True
-                    print(f"Tunnel {tid}: {error}", file=sys.stderr)
-        if failed:
+            passed = test_all(*load())
+        if not passed:
             sys.exit(1)
     else:
         cli()

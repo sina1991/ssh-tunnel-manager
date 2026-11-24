@@ -35,8 +35,8 @@ assigning its listener to the manager.
   authentication. Only the public key is registered on the peer. Regular
   dashboard-to-peer operations require key-based login. For unattended operations,
   the management key must work without an interactive SSH agent.
-- **Tunnels → 21 / 22** — Forward / Reverse. Each has Add, Remove, Test, Status,
-  Enable and start, and Disable and stop. Use the dashboard host's public IPv4
+- **Tunnels** — Add, Remove, Test one, Test all, and Status. Choose Forward or
+  Reverse when adding a tunnel. New tunnels start immediately and at boot. Use the dashboard host's public IPv4
   address as the listen address if it is assigned to an interface and the listener
   must accept external connections. Permit the chosen TCP port in your firewalls.
   The TCP target is `127.0.0.1` on the selected peer.
@@ -53,7 +53,8 @@ Custom sshd policies must allow public-key login for that account and load
 ## Checks
 
 The dashboard separates service state from the last connection test. The timer
-runs every 30 minutes. Manual tests report SSH, listener, and TCP path. TCP path
+runs every 30 minutes. Test all checks both tunnel types and continues after
+a failure. Manual tests report SSH, listener, and TCP path. TCP path
 testing opens the listener and checks for a new established loopback socket at
 the target while holding the connection. This probe expects services that leave
 the TCP session open long enough to observe and can be affected by simultaneous

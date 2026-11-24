@@ -63,8 +63,13 @@ fi
 
 echo "==> Installing prerequisites"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y curl git openssh-client openssh-server p7zip-full python3 iproute2 util-linux coreutils
+if ! {
+    apt-get update &&
+        apt-get install -y curl git openssh-client openssh-server p7zip-full python3 iproute2 util-linux coreutils
+} >"$TMP/packages.log" 2>&1; then
+    cat "$TMP/packages.log" >&2
+    exit 1
+fi
 
 register_public_key() (
     local ssh_dir="$1"
@@ -170,8 +175,11 @@ PYTHON
         echo "The ZIP restore script does not support the expected input handoff." >&2
         exit 1
     fi
-    LC_ALL=C.UTF-8 HOME=/root STM_ZIP_HELPER="$TMP/unlock-zip.py" STM_PASSWORD_FILE="$password_file" \
-        bash "$TMP/restore.sh" "$ZIP" </dev/tty
+    if ! LC_ALL=C.UTF-8 HOME=/root STM_ZIP_HELPER="$TMP/unlock-zip.py" STM_PASSWORD_FILE="$password_file" \
+        bash "$TMP/restore.sh" "$ZIP" </dev/tty >"$TMP/restore.log"; then
+        cat "$TMP/restore.log" >&2
+        exit 1
+    fi
     rm -f -- "$password_file"
     rmdir -- "$password_dir"
     password_dir=""
@@ -181,16 +189,16 @@ PYTHON
         echo "SSH key pair installed from the backup."
     fi
     register_public_key /root/.ssh
-    eval "$(ssh-agent -s)"
+    eval "$(ssh-agent -s)" >/dev/null
     installer_agent=yes
     ssh-add /root/.ssh/30na_windows </dev/tty
 fi
 
 echo "==> Downloading project"
-git clone --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"
+git clone --quiet --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"
 if [[ -n "$revision" && "$(git -C "$TMP/repo" rev-parse HEAD)" != "$revision" ]]; then
-    git -C "$TMP/repo" fetch --depth 1 origin "$revision"
-    git -C "$TMP/repo" checkout --detach "$revision"
+    git -C "$TMP/repo" fetch --quiet --depth 1 origin "$revision"
+    git -C "$TMP/repo" checkout --quiet --detach "$revision"
 fi
 git -C "$TMP/repo" rev-parse HEAD > "$TMP/revision"
 
