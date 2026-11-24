@@ -17,20 +17,48 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
+ZIP=/root/30na-SSH-Backup.zip
+if [[ -z "$peer" && ! -f "$ZIP" ]]; then
+    echo "Place the encrypted backup at $ZIP and run the installer again." >&2
+    exit 1
+fi
+
 if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; then
     echo "ERROR: This installer requires a running systemd system." >&2
     exit 1
 fi
 
 TMP="$(mktemp -d)"
+password_dir=""
+installer_agent=""
 cleanup() {
-    rm -rf "$TMP"
+    if [[ -n "$password_dir" ]]; then
+        rm -rf -- "$password_dir"
+    fi
+    if [[ -n "$installer_agent" ]]; then
+        ssh-agent -k >/dev/null || true
+    fi
+    rm -rf -- "$TMP"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-if [[ -z "$peer" && ! -f /root/30na-SSH-Backup.zip ]]; then
-    echo "Place the encrypted backup at /root/30na-SSH-Backup.zip and run the installer again." >&2
-    exit 1
+if [[ -z "$peer" ]]; then
+    if ! command -v nano >/dev/null 2>&1; then
+        echo "Install nano first, then rerun the installer." >&2
+        exit 1
+    fi
+    password_dir="$(mktemp -d /dev/shm/tunnel-manager-password.XXXXXXXX)"
+    password_file="$password_dir/zip-password.txt"
+    : > "$password_file"
+    echo "Enter only the ZIP password in nano. Save with Ctrl+O, Enter, then exit with Ctrl+X."
+    nano -I "$password_file" </dev/tty >/dev/tty
+    if ! awk 'NR > 1 {exit 1} NR == 1 {valid = length($0) > 0} END {if (!valid) exit 1}' "$password_file"; then
+        echo "Enter the ZIP password on one line. Installation cancelled." >&2
+        exit 1
+    fi
 fi
 
 echo "==> Installing prerequisites"
@@ -73,7 +101,18 @@ if [[ -z "$peer" ]]; then
     if [[ -f /root/.ssh/30na_windows && -f /root/.ssh/30na_windows.pub ]]; then
         existing_pair=yes
     fi
-    HOME=/root bash "$TMP/restore.sh" /root/30na-SSH-Backup.zip </dev/tty
+    # The pinned restore script reads the 7-Zip password from the terminal.
+    # Route that single read through a private descriptor and retain the TTY
+    # for any SSH key passphrase prompt.
+    sed -i '/^if ! "\$seven" e /s|</dev/tty|<\&8|' "$TMP/restore.sh"
+    if ! grep -Eq '^if ! "\$seven" e .*<&8; then$' "$TMP/restore.sh"; then
+        echo "The ZIP restore script does not support the expected input handoff." >&2
+        exit 1
+    fi
+    HOME=/root bash "$TMP/restore.sh" "$ZIP" 8<"$password_file" </dev/tty
+    rm -f -- "$password_file"
+    rmdir -- "$password_dir"
+    password_dir=""
     if [[ "$existing_pair" == yes ]]; then
         echo "Existing SSH key pair matches the backup."
     else
@@ -81,7 +120,7 @@ if [[ -z "$peer" ]]; then
     fi
     register_public_key /root/.ssh
     eval "$(ssh-agent -s)"
-    trap 'ssh-agent -k >/dev/null; cleanup' EXIT
+    installer_agent=yes
     ssh-add /root/.ssh/30na_windows </dev/tty
 fi
 
